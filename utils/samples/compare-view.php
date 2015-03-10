@@ -1,24 +1,19 @@
 <?php 
+
+	require_once('functions.php');
 	$path = $_GET['path'];
 	$mode = @$_GET['mode'];
 	$i = $_GET['i'];
 	$continue = @$_GET['continue'];
 
-	
-	
+	$compare = json_decode(file_get_contents('temp/compare.json'));
+	$comment = @$compare->$path->comment;
 
 
-	if (!get_browser(null, true)) {
-		$warning = 'Unable to get the browser info. Make sure a php_browscap.ini file extists, see ' .
-		'<a href="http://php.net/manual/en/function.get-browser.php">get_browser</a>.';
-	} else {
-		$browser = get_browser(null, true);
-		$browserKey = @$browser['parent'];
-		if (!$browserKey) {
-			$warning = 'Unable to get the browser info. Make sure php_browscap.ini is updated, see ' .
-			'<a target="_blank" href="http://php.net/manual/en/function.get-browser.php">get_browser</a>.';
-		}
-	}
+	$isUnitTest = strstr(file_get_contents("../../samples/$path/demo.details"), 'qunit') ? true : false;
+	
+	$browser = getBrowser();
+	$browserKey = $browser['parent'];
 
 ?><!DOCTYPE HTML>
 <html>
@@ -32,6 +27,9 @@
 
 		
 		<script type="text/javascript">
+			var diff,
+				commentHref = 'compare-comment.php?path=<?php echo $path ?>&i=<?php echo $i ?>&diff=',
+				commentFrame;
 			$(function() {
 				// the reload button
 				$('#reload').click(function() {
@@ -39,7 +37,7 @@
 				});
 
 				$('#comment').click(function () {
-					location.href = 'compare-comment.php?path=<?php echo $path ?>&i=<?php echo $i ?>';
+					location.href = commentHref;
 				});
 
 				$(window).bind('keydown', parent.keyDown);
@@ -66,12 +64,12 @@
 				if (window.parent.frames[0]) {
 					var contentDoc = window.parent.frames[0].document,
 						li = contentDoc.getElementById('li<?php echo $i ?>'),
-						diff,
 						background = 'none';
 					
 					if (li) {
 						$(li).removeClass("identical");
 						$(li).removeClass("different");
+						$(li).removeClass("approved");
 						$(li).addClass(className);
 						
 						
@@ -81,9 +79,16 @@
 						if (difference !== undefined) {
 							if (typeof difference === 'object') {
 								diff = difference.dissimilarityIndex.toFixed(2);
+
 							} else {
 								diff = difference;
 							}
+
+							<?php if ($comment->symbol == 'check') : ?>
+							if (diff.toString() === '<?php echo $comment->diff ?>') {
+								$(li).addClass('approved');
+							}
+							<?php endif; ?>
 							
 							// Compare to reference
 							/*
@@ -99,7 +104,12 @@
 									'class': 'dissimilarity-index',
 									href: location.href.replace(/continue=true/, ''),
 									target: 'main',
-									title: 'Difference between exported images. The number in parantheses is the reference diff, generated on the first run after clearing temp dir cache.' ,
+									<?php if ($isUnitTest) : ?>
+									title: 'How many unit tests passed out of the total' ,
+									<?php else : ?>
+									title: 'Difference between exported images. The number in parantheses is the reference diff, ' + 
+										'generated on the first run after clearing temp dir cache.' ,
+									<?php endif; ?>
 									'data-diff': diff
 								})
 								.css({
@@ -107,6 +117,19 @@
 								})
 								.html(diff)
 								.appendTo(li);
+
+
+							commentHref = commentHref.replace('diff=', 'diff=' + diff + '&focus=false');
+							
+							if (!commentFrame) {
+								commentFrame = $('<iframe>')
+									.attr({
+										id: 'comment-iframe',
+										src: commentHref
+									})
+									.appendTo('#comment-placeholder');
+							}
+
 						} else {
 							$span = $('<a>')
 								.attr({
@@ -115,7 +138,7 @@
 									target: 'main',
 									title: 'Compare'
 								})
-								.html('<i class="icon-columns"></i>')
+								.html('<i class="<?php echo ($isUnitTest ? 'icon-puzzle-piece' : 'icon-columns'); ?>"></i>')
 								.appendTo(li);
 
 						}
@@ -183,6 +206,9 @@
 			}
 			
 			function onDifferent(diff) {
+				if (diff === 'Error' || /^[0-9]+\/[0-9]+$/.test(diff)) { // Otherwise, it is saved from compare-iframe.php
+					$.get('compare-update-report.php', { path: '<?php echo $path ?>', diff: diff });
+				}
 				markList("different", diff);
 				proceed();
 			}
@@ -257,7 +283,9 @@
 				$rightImage.click(toggle);
 			}
 			
-			var report = "";
+			var report = "",
+				startLocalServer = '<pre>$ cd GitHub/highcharts.com/exporting-server/java/highcharts-export/highcharts-export-web\n' +
+					'$ mvn jetty:run</pre>';
 			function onBothLoad() {
 
 				var out,
@@ -289,7 +317,7 @@
 
 				if (mode === 'images') {
 					if (rightSVG.indexOf('NaN') !== -1) {
-						report += "<br/>The generated SVG contains NaN";
+						report += "<div>The generated SVG contains NaN</div>";
 						$('#report').html(report)
 							.css('background', '#f15c80');
 						onDifferent('Error');
@@ -300,7 +328,7 @@
 							.css('background', "#a4edba");
 
 					} else {
-						report += "<br/>The generated SVG is different, checking exported images...";
+						report += "<div>The generated SVG is different, checking exported images...</div>";
 						
 						$('#report').html(report)
 							.css('background', 'gray');
@@ -313,22 +341,33 @@
 								rightSVG: rightSVG,
 								path: "<?php echo $path ?>".replace(/\//g, '--')	
 							}, 
+							error: function (xhr) {
+								report += '<div>' +	xhr.responseText + '</div>'
+								onDifferent('Error');
+								$('#report').html(report)
+									.css('background', identical ? "#a4edba" : '#f15c80');
+							},
 							success: function (data) {
+
+								if (data.fallBackToOnline) {
+									report += '<div>Preferred export server not started, fell back to export.highcharts.com. ' +
+										'Start local server like this: ' + startLocalServer + '</div>';
+								}
+
 								if (data.dissimilarityIndex === 0) {
 									identical = true;
 									
-									report += '<br/>The exported images are identical'; 
+									report += '<div>The exported images are identical</div>'; 
 									
 									onIdentical();
 									
 								} else if (data.dissimilarityIndex === undefined) {
-									report += '<br/><br/><b>Image export failed. Is the exporting server responding? If running local server, start it like this:</b>' +
-										'<pre>$ cd GitHub/highcharts.com/exporting-server/java/highcharts-export/highcharts-export-web\n' +
-										'$ mvn jetty:run</pre>'
+									report += '<div><b>Image export failed. Is the exporting server responding? If running local server, start it like this:</b>' +
+										startLocalServer + '</div>'
 									onDifferent('Error');
 									
 								} else {
-									report += '<br/>The exported images are different (dissimilarity index: '+ data.dissimilarityIndex.toFixed(2) +')';
+									report += '<div>The exported images are different (dissimilarity index: '+ data.dissimilarityIndex.toFixed(2) +')</div>';
 									
 									onDifferent(data);
 								}
@@ -349,11 +388,11 @@
 						console.log("Warning: Left and right versions are equal.");
 					}
 					
-					report += 'Left version: '+ leftVersion +'; right version: '+ rightVersion +'<br/>';
+					report += '<div>Left version: '+ leftVersion +'; right version: '+ rightVersion +'</div>';
 					
 					report += identical ?
-						'The innerHTML is identical' :
-						'The innerHTML is different, testing generated SVG...';
+						'<div>The innerHTML is identical</div>' :
+						'<div>The innerHTML is different, testing generated SVG...</div>';
 						
 					$('#report').html(report)
 						.css('background', identical ? "#a4edba" : '#f15c80');
@@ -382,55 +421,9 @@
 				
 			}
 		</script>
-		<style type="text/css">
-			.top-bar {
-				color: white;
-				font-family: Arial, sans-serif; 
-				font-size: 0.8em; 
-				padding: 0.5em; 
-				height: 3.5em;
-				background: #34343e;
-				box-shadow: 0px 0px 8px #888;
-			}
-			
-			.top-bar a {
-				color: white;
-				text-decoration: none;
-				font-weight: bold;
-			}
-			
-			#report {
-				border-radius: 5px;
-				color: white;
-				margin-bottom: 0.5em;
-				border: 1px solid silver;
-				font-family: Arial, sans-serif; 
-				font-size: 0.8em; 
-				padding: 0.5em; 
-				
-			}
-
-			pre#svg {
-				padding: 1em;
-				border: 1px solid silver;
-				background-color: #F8F8F8;
-			}
-			del {
-				color: white;
-				background-color: red;
-				border-radius: 3px;
-				padding: 0 3px;
-			}
-			ins {
-				color: white;
-				background-color: green;
-				border-radius: 3px;
-				padding: 0 3px;
-			}
-		</style>
 		
 	</head>
-	<body style="margin: 0">
+	<body class="<?php echo ($isUnitTest ? 'unit' : 'visual'); ?>">
 		
 		<div><?php echo @$warning ?></div>
 		<div class="top-bar">
@@ -445,24 +438,21 @@
 
 		<div style="margin: 1em">
 		
-		<div id="report"></div>
-		
-		<table>
-			<tr>
-				<td><iframe id="iframe-left" src="compare-iframe.php?which=left&amp;<? echo $_SERVER['QUERY_STRING'] ?>" 
-					style="width: 500px; height: 400px; border: 1px dotted gray"></iframe></td>
-				<td><iframe id="iframe-right" src="compare-iframe.php?which=right&amp;<? echo $_SERVER['QUERY_STRING'] ?>" 
-					style="width: 500px; height: 400px; border: 1px dotted gray"></iframe></td>
-			</tr>
-			<tr>
-				<td colspan="2">
-					<pre id="svg" style="overflow: hidden; width: 1000px; height: 10px; cursor: pointer;"></pre>
-					<div id="preview" style="overflow: auto; width: 1000px; position: relative"></div>
-					<button id="overlay-compare" style="display:none">Compare overlaid</button>
-				</td>
-			</tr>
-		</table>
-		
+			<div id="report" class="test-report"></div>
+			
+			<div id="frame-row">
+				<?php if (!$isUnitTest) : ?>
+				<iframe id="iframe-left" src="compare-iframe.php?which=left&amp;<?php echo $_SERVER['QUERY_STRING'] ?>"></iframe>
+				<?php endif; ?>
+				<iframe id="iframe-right" src="compare-iframe.php?which=right&amp;<?php echo $_SERVER['QUERY_STRING'] ?>"></iframe>
+				
+				<div id="comment-placeholder"></div>
+			</div>
+			
+			<pre id="svg"></pre>
+			
+			<div id="preview"></div>
+			<button id="overlay-compare" style="display:none">Compare overlaid</button>
 		
 		
 		</div>

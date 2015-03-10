@@ -165,7 +165,7 @@ wrap(Axis.prototype, 'autoLabelAlign', function (proceed) {
 });
 
 // Override getPlotLinePath to allow for multipane charts
-Axis.prototype.getPlotLinePath = function (value, lineWidth, old, force, translatedValue) {
+wrap(Axis.prototype, 'getPlotLinePath', function (proceed, value, lineWidth, old, force, translatedValue) {
 	var axis = this,
 		series = (this.isLinked && !this.series ? this.linkedParent.series : this.series),
 		chart = axis.chart,
@@ -181,19 +181,22 @@ Axis.prototype.getPlotLinePath = function (value, lineWidth, old, force, transla
 		axes2,
 		uniqueAxes;
 
-	// Get the related axes based on series
-	if (axis.coll === 'xAxis' || axis.coll === 'yAxis') { //#3360 series should be ignored in case of color Axis
-		axes = (axis.isXAxis ? 
-			(defined(axis.options.yAxis) ?
-				[chart.yAxis[axis.options.yAxis]] : 
-				map(series, function (S) { return S.yAxis; })
-			) :
-			(defined(axis.options.xAxis) ?
-				[chart.xAxis[axis.options.xAxis]] : 
-				map(series, function (S) { return S.xAxis; })
-			)
-		);
+	// Ignore in case of color Axis. #3360, #3524
+	if (axis.coll === 'colorAxis') {
+		return proceed.apply(this, [].slice.call(arguments, 1));
 	}
+
+	// Get the related axes based on series
+	axes = (axis.isXAxis ? 
+		(defined(axis.options.yAxis) ?
+			[chart.yAxis[axis.options.yAxis]] : 
+			map(series, function (S) { return S.yAxis; })
+		) :
+		(defined(axis.options.xAxis) ?
+			[chart.xAxis[axis.options.xAxis]] : 
+			map(series, function (S) { return S.xAxis; })
+		)
+	);
 
 	// Get the related axes based options.*Axis setting #2810
 	axes2 = (axis.isXAxis ? chart.yAxis : chart.xAxis);
@@ -212,7 +215,7 @@ Axis.prototype.getPlotLinePath = function (value, lineWidth, old, force, transla
 	// Remove duplicates in the axes array. If there are no axes in the axes array,
 	// we are adding an axis without data, so we need to populate this with grid
 	// lines (#2796).
-	uniqueAxes = axes.length ? [] : [axis];
+	uniqueAxes = axes.length ? [] : [axis.isXAxis ? chart.yAxis[0] : chart.xAxis[0]]; //#3742
 	each(axes, function (axis2) {
 		if (inArray(axis2, uniqueAxes) === -1) {
 			uniqueAxes.push(axis2);
@@ -224,21 +227,39 @@ Axis.prototype.getPlotLinePath = function (value, lineWidth, old, force, transla
 	if (!isNaN(translatedValue)) {
 		if (axis.horiz) {
 			each(uniqueAxes, function (axis2) {
-				y1 = axis2.top;
+				var skip;
+
+				y1 = axis2.pos;
 				y2 = y1 + axis2.len;
 				x1 = x2 = mathRound(translatedValue + axis.transB);
 
-				if ((x1 >= axisLeft && x1 <= axisLeft + axis.width) || force) {
+				if (x1 < axisLeft || x1 > axisLeft + axis.width) { // outside plot area
+					if (force) {
+						x1 = x2 = mathMin(mathMax(axisLeft, x1), axisLeft + axis.width);
+					} else {
+						skip = true;
+					}
+				}
+				if (!skip) {
 					result.push('M', x1, y1, 'L', x2, y2);
 				}
 			});
 		} else {
 			each(uniqueAxes, function (axis2) {
-				x1 = axis2.left;
-				x2 = x1 + axis2.width;
+				var skip;
+
+				x1 = axis2.pos;
+				x2 = x1 + axis2.len;
 				y1 = y2 = mathRound(axisTop + axis.height - translatedValue);
 
-				if ((y1 >= axisTop && y1 <= axisTop + axis.height) || force) {
+				if (y1 < axisTop || y1 > axisTop + axis.height) { // outside plot area
+					if (force) {
+						y1 = y2 = mathMin(mathMax(axisTop, y1), axis.top + axis.height);
+					} else {
+						skip = true;
+					}
+				}
+				if (!skip) {
 					result.push('M', x1, y1, 'L', x2, y2);
 				}
 			});
@@ -246,13 +267,15 @@ Axis.prototype.getPlotLinePath = function (value, lineWidth, old, force, transla
 	}
 	if (result.length > 0) {
 		return renderer.crispPolyLine(result, lineWidth || 1); 
+	} else {
+		return null; //#3557 getPlotLinePath in regular Highcharts also returns null
 	}
-};
+});
 
 // Override getPlotBandPath to allow for multipane charts
 Axis.prototype.getPlotBandPath = function (from, to) {		
-	var toPath = this.getPlotLinePath(to),
-		path = this.getPlotLinePath(from),
+	var toPath = this.getPlotLinePath(to, null, null, true),
+		path = this.getPlotLinePath(from, null, null, true),
 		result = [],
 		i;
 
@@ -264,7 +287,7 @@ Axis.prototype.getPlotBandPath = function (from, to) {
 	} else { // outside the axis area
 		result = null;
 	}
-		
+
 	return result;
 };
 
@@ -566,6 +589,7 @@ wrap(Series.prototype, 'render', function (proceed) {
 
 		// On redrawing, resizing etc, update the clip rectangle
 		} else if (this.chart[this.sharedClipKey]) {
+			stop(this.chart[this.sharedClipKey]); // #2998
 			this.chart[this.sharedClipKey].attr({
 				width: this.xAxis.len,
 				height: this.yAxis.len

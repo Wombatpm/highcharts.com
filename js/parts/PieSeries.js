@@ -16,9 +16,10 @@ defaultPlotOptions.pie = merge(defaultSeriesOptions, {
 		enabled: true,
 		formatter: function () { // #2945
 			return this.point.name;
-		}
+		},
 		// softConnector: true,
-		//y: 0
+		x: 0
+		// y: 0
 	},
 	ignoreHiddenPoint: true,
 	//innerSize: 0,
@@ -53,12 +54,6 @@ var PiePoint = extendClass(Point, {
 		var point = this,
 			toggleSlice;
 
-		// Disallow negative values (#1530)
-		if (point.y < 0) {
-			point.y = null;
-		}
-
-		//visible: options.visible !== false,
 		extend(point, {
 			visible: point.visible !== false,
 			name: pick(point.name, 'Slice')
@@ -82,7 +77,8 @@ var PiePoint = extendClass(Point, {
 	setVisible: function (vis) {
 		var point = this,
 			series = point.series,
-			chart = series.chart;
+			chart = series.chart,
+			doRedraw = !series.isDirty && series.options.ignoreHiddenPoint;
 
 		// if called without an argument, toggle visibility
 		point.visible = point.options.visible = vis = vis === UNDEFINED ? !point.visible : vis;
@@ -95,17 +91,19 @@ var PiePoint = extendClass(Point, {
 			}
 		});
 
-		// Make sure halo is hidden (#3391)
-		if (!vis) {
-			point.setState(NORMAL_STATE);
-		}
-
 		if (point.legendItem) {
+			if (chart.hasRendered) {
+				series.updateTotals();
+				chart.legend.clearItems();
+				if (!doRedraw) {
+					chart.legend.render();
+				}
+			}
 			chart.legend.colorizeItem(point, vis);
 		}
-		
+
 		// Handle ignore hidden slices
-		if (!series.isDirty && series.options.ignoreHiddenPoint) {
+		if (doRedraw) {
 			series.isDirty = true;
 			chart.redraw();
 		}
@@ -172,7 +170,6 @@ var PieSeries = {
 		'stroke-width': 'borderWidth',
 		fill: 'color'
 	},
-	singularTooltips: true,
 
 	/**
 	 * Pies have one color each point
@@ -228,17 +225,15 @@ var PieSeries = {
 	},
 
 	/**
-	 * Extend the generatePoints method by adding total and percentage properties to each point
+	 * Recompute total chart sum and update percentages of points.
 	 */
-	generatePoints: function () {
+	updateTotals: function () {
 		var i,
 			total = 0,
 			points,
 			len,
 			point,
 			ignoreHiddenPoint = this.options.ignoreHiddenPoint;
-
-		Series.prototype.generatePoints.call(this);
 
 		// Populate local vars
 		points = this.points;
@@ -247,6 +242,12 @@ var PieSeries = {
 		// Get the total sum
 		for (i = 0; i < len; i++) {
 			point = points[i];
+
+			// Disallow negative values (#1530, #3623)
+			if (point.y < 0) {
+				point.y = null;
+			}
+			
 			total += (ignoreHiddenPoint && !point.visible) ? 0 : point.y;
 		}
 		this.total = total;
@@ -254,10 +255,18 @@ var PieSeries = {
 		// Set each point's properties
 		for (i = 0; i < len; i++) {
 			point = points[i];
-			point.percentage = total > 0 ? (point.y / total) * 100 : 0;
+			//point.percentage = (total <= 0 || ignoreHiddenPoint && !point.visible) ? 0 : point.y / total * 100;
+			point.percentage = (total > 0 && (point.visible || !ignoreHiddenPoint)) ? point.y / total * 100 : 0;
 			point.total = total;
 		}
-		
+	},
+
+	/**
+	 * Extend the generatePoints method by adding total and percentage properties to each point
+	 */
+	generatePoints: function () {
+		Series.prototype.generatePoints.call(this);
+		this.updateTotals();
 	},
 	
 	/**
@@ -442,6 +451,9 @@ var PieSeries = {
 		});
 
 	},
+
+
+	searchPoint: noop,
 
 	/**
 	 * Utility for sorting data labels
